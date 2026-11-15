@@ -279,3 +279,107 @@ adaptive_bw <- function(data, ref_model){
   
   return(adaptive_bw_factor*bw_RoT)
 }
+
+# Inputs: 
+# x: a scalar at which the user wants to evaluate the adaptive basis function
+
+# data: a list that contains m+1 samples, where list[[i]] should contain a vector representing the (i+1)-th sample.
+
+# kernel_bw: a vector that gives user-specified kernel bandwidths used in the step of estimation of eigenfunctions,
+             # whose length should be the same as the number of populations considered;
+             # if not supplied, the default is the proposed adaptive way of choosing such kernel bandwidths (see the paper for details).
+
+# dim_basis: a scalar that gives user-specified dimension of the adaptive basis function;
+             # if not supplied, the default dimension is the proposed adaptive way of choosing such dimension (see the paper for details).
+
+# Output: 
+# a vector containing the values of adaptive basis function at x
+
+adaptivebasis <- function(x, data, kernel_bw = "adaptive", dim_basis = "adaptive"){
+  m <- length(data) - 1 # m+1 is the total number of populations 
+  sizes <- numeric(m+1) # sample sizes 
+  combined_data <- NULL # the pooled sample
+  for (i in 1:(m+1)){
+    sizes[i] <- length(data[[i]])
+    combined_data <- c(combined_data, data[[i]])
+  }
+  n <- sum(sizes)
+  
+  if (m < 1) stop("Error: number of samples should be at least 2!")
+  if ((dim_basis != "adaptive") & (dim_basis > m)) stop("Error: dimension of the basis function should be smaller than the number of samples!")
+  
+  # aggregate the same population data at their unique values to avoid excessive computational cost 
+  unique_data <- list() 
+  for (i in 1:(m+1)){ 
+    unique_pt <- unique(data[[i]]) 
+    num_unique <- length(unique_pt)
+    # the first column is the value of the unique points, the second column is the number of obs that equal to that value  
+    unique_data[[i]] <- matrix(nrow = num_unique, ncol = 2) 
+    for (j in 1:num_unique){ 
+      unique_data[[i]][j,1] <- unique_pt[j] 
+      unique_data[[i]][j,2] <- sum(data[[i]] == unique_pt[j]) 
+    } 
+  } 
+  
+  if (kernel_bw == "adaptive") kernel_bw <- adaptive_bw(data = data, ref_model = "normal")
+  if (dim_basis == "adaptive") dim_basis <- adaptive_dim(data = data, kernel_bw = kernel_bw)
+  
+  ##############################################################################################
+  # Construct the M matrix used for obtaining eigenvalues and vectors 
+  M_mat <- matrix(NA, nrow = (m+1), ncol = (m+1)) 
+  # Record the log density ratios
+  ff_tmp_seq <- list() 
+  for (j in 1:(m+1)) ff_tmp_seq[[j]] <- numeric(length(combined_data))  
+  for (i in 1:length(combined_data)){ 
+    x_M <- combined_data[i] 
+    log_base_M <- log(sum(unique_data[[1]][,2]*dnorm(x = (x_M-unique_data[[1]][,1]), mean = 0, sd = kernel_bw[1]))/sum(unique_data[[1]][,2])) 
+    for (j in 1:(m+1)){ 
+      ff_tmp_seq[[j]][i] <- log(sum(unique_data[[j]][,2]*dnorm(x = (x_M-unique_data[[j]][,1]), mean = 0, sd = kernel_bw[j]))/sum(unique_data[[j]][,2])) - log_base_M 
+    }  
+  } 
+  
+  # Obtain the centered log density ratio 
+  f_sum_M <- numeric(length(combined_data))  
+  mean_log_DR <- numeric(m+1)
+  for (j in 1:(m+1)){ 
+    mean_log_DR[j] <- mean(ff_tmp_seq[[j]])
+    ff_tmp_seq[[j]] <- ff_tmp_seq[[j]] - mean_log_DR[j] 
+    f_sum_M <- f_sum_M + ff_tmp_seq[[j]]  
+  }  
+  f_avg_M <- f_sum_M/(m+1) 
+  for (j in 1:(m+1)) ff_tmp_seq[[j]] <- ff_tmp_seq[[j]] - f_avg_M 
+  
+  # Obtain the matrix M_mat and its eigen-system
+  for (i_1 in 1:(m+1)){ 
+    for (i_2 in i_1:(m+1)){ 
+      ff_tmp_mat <- ff_tmp_seq[[i_1]]*ff_tmp_seq[[i_2]]  
+      M_mat[i_1, i_2] <- mean(ff_tmp_mat) 
+      M_mat[i_2, i_1] <- M_mat[i_1, i_2] 
+    }
+  }    
+  eigen_sys <- eigen(M_mat) # The (m+1)-th eigenvalue of M_mat will always be 0 
+  
+  ##############################################################################################
+  # Specify the adaptive basis function
+  log_base <- log(sum(unique_data[[1]][,2]*dnorm(x = (x-unique_data[[1]][,1]), mean = 0, sd = kernel_bw[1]))/sum(unique_data[[1]][,2])) 
+  f_sum <- 0 
+  f_naive_LDR <- numeric(m+1) 
+  f_naive_LDR[1] <- 0 
+  for (i in 2:(m+1)){ 
+    f_naive_LDR[i] <- log(sum(unique_data[[i]][,2]*dnorm(x = (x-unique_data[[i]][,1]), mean = 0, sd = kernel_bw[i]))/sum(unique_data[[i]][,2])) - log_base 
+    # centerize the log density ratios 
+    f_naive_LDR[i] <- f_naive_LDR[i] - mean_log_DR[i]
+    f_sum <- f_sum + f_naive_LDR[i]  
+  }  
+  f_avg <- f_sum/(m+1) 
+  f_naive_LDR <- f_naive_LDR - f_avg 
+  
+  fpca_basis_fn <- numeric(dim_basis)  
+  for (j in 1:dim_basis){ 
+    fpca_basis_fn[j] <- (eigen_sys$values[j]^(-1/2))*sum((eigen_sys$vectors[(1:(m+1)),j])*f_naive_LDR) 
+  } 
+  
+  return(fpca_basis_fn) 
+}
+####################################################################################################################################
+
